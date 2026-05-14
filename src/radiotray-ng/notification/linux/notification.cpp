@@ -18,6 +18,10 @@
 #include <radiotray-ng/common.hpp>
 #include <radiotray-ng/notification/notification.hpp>
 #include <libnotify/notify.h>
+#include <mutex>
+#include <thread>
+#include <chrono>
+#include <future>
 
 // lazy pimpl...
 struct notify_t
@@ -37,6 +41,8 @@ struct notify_t
 		g_object_unref(G_OBJECT(this->nn));
 		notify_uninit();
 	}
+
+	std::mutex mtx;
 	NotifyNotification* nn;
 };
 
@@ -62,6 +68,26 @@ void Notification::notify(const std::string& title, const std::string& message, 
 {
 	LOG(debug) << "notify: " << title << ", " << message << ", " << image;
 
+	// Attempt to acquire the lock without blocking. If a previous notification
+	// call is still stuck in the daemon, skip this one rather than blocking the
+	// main loop (which would stall media key processing).
+	std::unique_lock<std::mutex> lock(this->n->mtx, std::try_to_lock);
+
+	if (!lock.owns_lock())
+	{
+		LOG(warning) << "notification daemon busy, skipping notification";
+		return;
+	}
+
 	notify_notification_update(this->n->nn, title.c_str(), message.c_str(), radiotray_ng::word_expand(image).c_str());
-	notify_notification_show(this->n->nn, nullptr);
+
+	GError* error = nullptr;
+	if (!notify_notification_show(this->n->nn, &error))
+	{
+		if (error)
+		{
+			LOG(warning) << "notification show failed: " << error->message;
+			g_error_free(error);
+		}
+	}
 }
