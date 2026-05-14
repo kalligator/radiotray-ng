@@ -4,6 +4,7 @@
 - Fork: `kalligator/radiotray-ng` (forked from `ebruck/radiotray-ng`)
 - User also uses: `IngoMeyer441/radiotray-ng-mpris` (MPRIS D-Bus bridge)
 - User's DE: elementaryOS 8.1 (Pantheon/wingpanel)
+- User's icon theme: `kpm-icons` at `~/.local/share/icons/kpm-icons/` (inherits elementary)
 
 ## Active Branches
 
@@ -14,7 +15,7 @@
 3. **Async notifications**: Dedicated worker thread with max-2 deque queue
 4. **Notification images**: Uses `file://` URI for absolute paths, `notify_notification_clear_hints()` between notifications
 5. **Failed station stays on old**: If download fails while playing, old station keeps going + error notification
-6. **User icon theme priority**: `gtk_icon_theme_prepend_search_path()` + `app_indicator_set_icon_theme_path()` for wingpanel
+6. **User icon theme paths**: `gtk_icon_theme_prepend_search_path()` + `app_indicator_set_icon_theme_path()`
 
 ### PR #2: `feature/seamless-dual-pipeline`
 **Full seamless switching** — more radical, probably not for upstream. Includes everything from PR #1 plus:
@@ -30,7 +31,6 @@
 - Bus messages dispatched on GTK main loop (`gst_bus_add_watch`)
 - GStreamer clock callbacks run on their own thread (timer_cb, pending_timer_cb)
 - Notification daemon (`io.elementary.notifications`) is buggy — blocks D-Bus calls when overloaded
-- `app_indicator_set_icon()` on elementaryOS goes through wingpanel's D-Bus → needs `set_icon_theme_path()` for user-local themes
 - `PlaylistDownloader::download_playlist()` is synchronous (curl) — blocks caller
 
 ## Config Keys Added
@@ -40,10 +40,28 @@
 | `seamless-switching` | `true` | Dual-pipeline (PR #2 only) |
 | `station-switch-delay` | `150` | Debounce ms for next/prev |
 
-## Known Issues / TODO
-- **Icon theme on wingpanel**: `app_indicator_set_icon_theme_path()` added — needs user testing. The path should be the parent directory containing the theme folders (e.g. `~/.local/share/icons`), and the icon files must follow freedesktop icon-theme-spec structure.
-- **Notification overlay**: Fixed by using `file://` URI + `clear_hints()` — needs user verification that the miniature overlay is gone.
-- **Upstream submission plan**: User wants to clean up branches for upstream PR. Late-stop branch is more conservative. Seamless branch is too radical for upstream but good for personal fork.
+## Icon Theme Status (IMPORTANT for next session)
+- **Panel icons (wingpanel)**: User uses ABSOLUTE PATHS in config as workaround:
+  ```json
+  "radiotray-ng-on": "/home/xeiristis/.local/share/icons/kpm-icons/apps/22/radiotray-ng-on.svg",
+  "radiotray-ng-off": "/home/xeiristis/.local/share/icons/kpm-icons/apps/22/radiotray-ng-off.svg"
+  ```
+- **GTK icon theme resolves correctly** (verified via python3 `Gtk.IconTheme.lookup_icon`) — `kpm-icons` theme has icons at `apps/24/radiotray-ng-on.svg` etc.
+- **`app_indicator_set_icon_theme_path()` HURTS** — it overrides normal theme lookup with a flat directory search. Should be REMOVED in next session. Without it, wingpanel should use normal GTK theme resolution. The user's absolute paths in config bypass the issue entirely for now.
+- **Bare icon names ("radiotray-ng-on") DON'T WORK** in wingpanel even though GTK finds them — likely because `app_indicator_set_icon_theme_path()` is interfering. Removing that call is the fix to try next session.
+- **Station notification images**: Work correctly with `file://` URI + `clear_hints()`. User has absolute paths in bookmarks.json `"image"` field. No dimension requirements.
+- **Apps menu icon**: User has local `.desktop` file with `Icon=radiotray` — resolves from theme fine after icon cache rebuild.
+
+## TODO for Next Session
+1. **Remove `app_indicator_set_icon_theme_path()`** from both branches — it interferes with normal wingpanel theme resolution. Test if bare icon names work without it (they should, now that icon cache is valid).
+2. **Notification overlay issue**: Verify the `file://` URI + `clear_hints()` approach eliminated the miniature overlay icon and stale image problems.
+3. **Upstream submission**: User wants to clean up the late-stop branch for an upstream PR to `ebruck/radiotray-ng`. The seamless branch stays on the personal fork.
+4. **Seamless branch testing**: User hasn't tested PR #2 yet — needs to build and verify the dual-pipeline approach works.
+
+## User's Station Image Setup
+- Absolute paths in bookmarks.json: `"image": "/home/xeiristis/.radios/rainbow89.png"`
+- Images are arbitrary dimensions (daemon scales them)
+- Stations without images use the config's `radiotray-ng-notification` value
 
 ## Files Modified (both branches)
 - `include/radiotray-ng/common.hpp` — config keys + defaults
@@ -54,4 +72,5 @@
 - `src/radiotray-ng/player/player.hpp` — Pipeline struct, dual pipeline (PR #2)
 - `src/radiotray-ng/player/player.cpp` — refactored for dual pipeline (PR #2)
 - `src/radiotray-ng/notification/linux/notification.cpp` — async worker, image fixes
-- `src/radiotray-ng/gui/appindicator/appindicator_gui.cpp` — icon theme paths
+- `src/radiotray-ng/gui/appindicator/appindicator_gui.cpp` — icon theme paths (needs cleanup: remove set_icon_theme_path)
+- `.kiro/session-context.md` — this file
