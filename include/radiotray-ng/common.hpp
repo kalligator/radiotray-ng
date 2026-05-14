@@ -95,6 +95,7 @@ using playlist_t = std::vector<std::string>;
 #define SLEEP_TIMER_KEY                   "sleep-timer"
 #define SPLIT_TITLE_KEY                   "split-title"
 #define LATE_STOP_KEY                     "late-stop"
+#define SEAMLESS_SWITCHING_KEY            "seamless-switching"
 #define STATION_SWITCH_DELAY_KEY          "station-switch-delay"
 #define IHR_TITLE_KEY                     "ihr-title"
 #define TAG_INFO_IN_LABEL_KEY             "tag-info-in-label"
@@ -150,7 +151,8 @@ using playlist_t = std::vector<std::string>;
 #define DEFAULT_SLEEP_TIMER_VALUE                uint32_t(60)
 #define DEFAULT_SPLIT_TITLE_VALUE                (true)
 #define DEFAULT_LATE_STOP_VALUE                  (true)
-#define DEFAULT_STATION_SWITCH_DELAY_VALUE       uint32_t(400)
+#define DEFAULT_SEAMLESS_SWITCHING_VALUE         (true)
+#define DEFAULT_STATION_SWITCH_DELAY_VALUE       uint32_t(100)
 #define DEFAULT_IHR_TITLE_KEY_VALUE              (true)
 #define DEFAULT_STATION_IMAGE_VALUE              ""
 #define DEFAULT_TAG_INFO_IN_LABEL_VALUE          (false)

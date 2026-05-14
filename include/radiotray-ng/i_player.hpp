@@ -35,4 +35,19 @@ public:
     virtual void unmute() = 0;
 
 	virtual bool is_muted() = 0;
+
+	// Seamless switching: start buffering a new stream on a silent pending
+	// pipeline. When ready (buffer >= threshold), a pending_ready event is
+	// published. Call activate() to swap it in, or cancel_prepare() to discard.
+	virtual bool prepare(const playlist_t& playlist) = 0;
+
+	// Swap the pending pipeline to active: stop old stream, unmute pending,
+	// set it to PLAYING. Returns false if no pending pipeline is ready.
+	virtual bool activate() = 0;
+
+	// Discard the pending pipeline without affecting the active stream.
+	virtual void cancel_prepare() = 0;
+
+	// Returns true if a pending pipeline is buffered and ready to activate.
+	virtual bool is_pending_ready() = 0;
 };

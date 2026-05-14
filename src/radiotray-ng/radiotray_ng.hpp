@@ -135,6 +135,7 @@ private:
 	void on_message_event(const IEventBus::event& ev, IEventBus::event_data_t& data);
 	void on_tags_changed_event_notification(const IEventBus::event& ev, IEventBus::event_data_t& data);
 	void on_tags_changed_event_processing(const IEventBus::event& ev, IEventBus::event_data_t& data);
+	void on_pending_ready_event(const IEventBus::event& ev, IEventBus::event_data_t& data);
 
 	void display_volume_level();
 	void register_handlers();
@@ -152,6 +153,17 @@ private:
 	std::atomic<bool> shutting_down{false};
 	int pending_station_index{-1};
 	std::string pending_group;
+
+	// Seamless switching: metadata for the station being prepared on the pending pipeline
+	struct PendingStationInfo
+	{
+		std::string group;
+		std::string station_name;
+		std::string url;
+		bool notifications = true;
+		bool active = false;  // true if a prepare() is in flight
+	};
+	PendingStationInfo seamless_pending;
 
 	Notification notification;
 
