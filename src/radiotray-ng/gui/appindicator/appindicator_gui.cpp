@@ -806,6 +806,15 @@ void AppindicatorGui::run(int argc, char* argv[])
 {
 	gtk_init(&argc, &argv);
 
+	// Ensure GTK's icon theme searches user-local icon directories first.
+	// This allows icons from ~/.local/share/icons/<theme>/ or ~/.icons/<theme>/
+	// to take priority over system-installed ones.
+	GtkIconTheme* icon_theme = gtk_icon_theme_get_default();
+	const std::string user_icons_local = radiotray_ng::word_expand("~/.local/share/icons");
+	const std::string user_icons_home = radiotray_ng::word_expand("~/.icons");
+	gtk_icon_theme_prepend_search_path(icon_theme, user_icons_local.c_str());
+	gtk_icon_theme_prepend_search_path(icon_theme, user_icons_home.c_str());
+
 	const std::string icon_off{radiotray_ng::word_expand(this->config->get_string(RADIOTRAY_NG_ICON_OFF_KEY, DEFAULT_RADIOTRAY_NG_ICON_OFF_VALUE))};
 
 	this->appindicator = app_indicator_new(APP_NAME, icon_off.c_str(), APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
