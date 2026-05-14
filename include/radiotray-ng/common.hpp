@@ -152,7 +152,7 @@ using playlist_t = std::vector<std::string>;
 #define DEFAULT_SPLIT_TITLE_VALUE                (true)
 #define DEFAULT_LATE_STOP_VALUE                  (true)
 #define DEFAULT_SEAMLESS_SWITCHING_VALUE         (true)
-#define DEFAULT_STATION_SWITCH_DELAY_VALUE       uint32_t(100)
+#define DEFAULT_STATION_SWITCH_DELAY_VALUE       uint32_t(150)
 #define DEFAULT_IHR_TITLE_KEY_VALUE              (true)
 #define DEFAULT_STATION_IMAGE_VALUE              ""
 #define DEFAULT_TAG_INFO_IN_LABEL_VALUE          (false)

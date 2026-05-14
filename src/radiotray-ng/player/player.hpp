@@ -38,7 +38,7 @@ struct Pipeline
 	playlist_t  current_playlist;
 
 	// Percentage threshold at which we consider buffering "ready" (for pending pipeline).
-	int         buffer_ready_threshold = 90;
+	int         buffer_ready_threshold = 100;
 };
 
 

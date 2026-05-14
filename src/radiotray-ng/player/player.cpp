@@ -324,8 +324,8 @@ bool Player::prepare(const playlist_t& playlist)
 	g_object_set(G_OBJECT(this->pending.playbin), "volume", vol / 100.0, NULL);
 	this->pending.has_played = true;  // skip startup volume logic
 
-	// Set buffer ready threshold from config (default 90%)
-	this->pending.buffer_ready_threshold = 90;
+	// Set buffer ready threshold (100% = fully buffered before signaling ready)
+	this->pending.buffer_ready_threshold = 100;
 
 	// Install the pending bus watch (different callback — no tags, no state events to UI)
 	gst_bus_add_watch(this->pending.bus, static_cast<GstBusFunc>(&Player::handle_pending_messages_cb), this);

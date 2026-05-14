@@ -18,6 +18,7 @@
 #include <radiotray-ng/common.hpp>
 #include <radiotray-ng/notification/notification.hpp>
 #include <libnotify/notify.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <mutex>
 #include <thread>
 #include <condition_variable>
@@ -111,7 +112,25 @@ private:
 
 			// This call may block if the daemon is unresponsive — that's fine,
 			// it only blocks this worker thread, not the main loop.
-			notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), e.image.c_str());
+			notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), nullptr);
+
+			// If the image is an absolute file path, load it as a pixbuf so
+			// the notification daemon displays it correctly (some daemons like
+			// elementaryOS don't resolve file paths passed as the icon parameter).
+			if (!e.image.empty() && e.image[0] == '/')
+			{
+				GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(e.image.c_str(), nullptr);
+				if (pixbuf)
+				{
+					notify_notification_set_image_from_pixbuf(this->nn, pixbuf);
+					g_object_unref(pixbuf);
+				}
+			}
+			else if (!e.image.empty())
+			{
+				// It's an icon theme name — set it via update's icon parameter
+				notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), e.image.c_str());
+			}
 
 			GError* error = nullptr;
 			if (!notify_notification_show(this->nn, &error))
