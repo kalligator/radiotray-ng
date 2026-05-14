@@ -48,6 +48,14 @@ RadiotrayNG::RadiotrayNG(std::shared_ptr<IConfig> config, std::shared_ptr<IBookm
 
 RadiotrayNG::~RadiotrayNG()
 {
+	// Signal the station switch worker to exit.
+	this->shutting_down = true;
+	this->switch_cv.notify_one();
+	if (this->switch_thread.joinable())
+	{
+		this->switch_thread.join();
+	}
+
 	this->config->save();
 }
 
@@ -256,7 +264,8 @@ void RadiotrayNG::next_station_msg()
 	{
 		if (this->current_station_index < int(this->current_group_stations.size()-1))
 		{
-			this->play(this->group, this->current_group_stations[++this->current_station_index].name);
+			++this->current_station_index;
+			this->schedule_station_switch();
 		}
 	}
 }
@@ -268,7 +277,74 @@ void RadiotrayNG::previous_station_msg()
 	{
 		if (this->current_station_index > 0)
 		{
-			this->play(this->group, this->current_group_stations[--this->current_station_index].name);
+			--this->current_station_index;
+			this->schedule_station_switch();
+		}
+	}
+}
+
+
+void RadiotrayNG::schedule_station_switch()
+{
+	{
+		std::lock_guard<std::mutex> lock(this->switch_mtx);
+		this->pending_station_index = this->current_station_index;
+		this->pending_group = this->group;
+		this->switch_pending = true;
+	}
+	this->switch_cv.notify_one();
+
+	// Lazily start the worker thread on first use.
+	if (!this->switch_thread.joinable())
+	{
+		this->switch_thread = std::thread(&RadiotrayNG::station_switch_worker, this);
+	}
+}
+
+
+void RadiotrayNG::station_switch_worker()
+{
+	while (!this->shutting_down)
+	{
+		std::unique_lock<std::mutex> lock(this->switch_mtx);
+		this->switch_cv.wait(lock, [this]{ return this->switch_pending.load() || this->shutting_down.load(); });
+
+		if (this->shutting_down)
+		{
+			break;
+		}
+
+		// Wait for the debounce period. If more next/prev presses come in during
+		// this time, pending_station_index gets updated and we restart the wait.
+		const auto delay = std::chrono::milliseconds(
+			this->config->get_uint32(STATION_SWITCH_DELAY_KEY, DEFAULT_STATION_SWITCH_DELAY_VALUE));
+
+		while (true)
+		{
+			int snapshot = this->pending_station_index;
+			lock.unlock();
+
+			std::this_thread::sleep_for(delay);
+
+			lock.lock();
+
+			// If the index hasn't changed during the sleep, the user is done pressing.
+			if (this->pending_station_index == snapshot)
+			{
+				break;
+			}
+			// Otherwise loop and wait again for the new value to settle.
+		}
+
+		this->switch_pending = false;
+		const int target_index = this->pending_station_index;
+		const std::string target_group = this->pending_group;
+		lock.unlock();
+
+		// Perform the actual station switch (downloads playlist, starts stream).
+		if (target_index >= 0 && target_index < int(this->current_group_stations.size()))
+		{
+			this->play(target_group, this->current_group_stations[target_index].name);
 		}
 	}
 }
