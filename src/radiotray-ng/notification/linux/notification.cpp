@@ -18,7 +18,6 @@
 #include <radiotray-ng/common.hpp>
 #include <radiotray-ng/notification/notification.hpp>
 #include <libnotify/notify.h>
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <mutex>
 #include <thread>
 #include <condition_variable>
@@ -112,24 +111,29 @@ private:
 
 			// This call may block if the daemon is unresponsive — that's fine,
 			// it only blocks this worker thread, not the main loop.
-			notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), nullptr);
 
-			// If the image is an absolute file path, load it as a pixbuf so
-			// the notification daemon displays it correctly (some daemons like
-			// elementaryOS don't resolve file paths passed as the icon parameter).
+			// Clear any previous image data to prevent stale images from
+			// persisting across notifications (we reuse the same object).
+			notify_notification_clear_hints(this->nn);
+
 			if (!e.image.empty() && e.image[0] == '/')
 			{
-				GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(e.image.c_str(), nullptr);
-				if (pixbuf)
-				{
-					notify_notification_set_image_from_pixbuf(this->nn, pixbuf);
-					g_object_unref(pixbuf);
-				}
+				// Absolute file path — pass as file:// URI in the icon field.
+				// This tells the daemon to use it as the notification image
+				// without setting a separate pixbuf hint (which causes the
+				// daemon to show both an overlay icon and a main image).
+				const std::string file_uri = "file://" + e.image;
+				notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), file_uri.c_str());
 			}
 			else if (!e.image.empty())
 			{
-				// It's an icon theme name — set it via update's icon parameter
+				// Icon theme name — set as the icon parameter.
 				notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), e.image.c_str());
+			}
+			else
+			{
+				// No image — clear everything.
+				notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), nullptr);
 			}
 
 			GError* error = nullptr;
