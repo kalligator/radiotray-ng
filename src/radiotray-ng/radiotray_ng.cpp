@@ -490,17 +490,17 @@ void RadiotrayNG::play_url(const std::string& url)
 
 void RadiotrayNG::play(const std::string& group, const std::string& station)
 {
-	if (this->state == STATE_PLAYING)
+	const bool late_stop = this->config->get_bool(LATE_STOP_KEY, DEFAULT_LATE_STOP_VALUE);
+	const bool was_playing = (this->state == STATE_PLAYING || this->state == STATE_BUFFERING);
+
+	// If late-stop is disabled, stop immediately (original behavior).
+	if (!late_stop && was_playing)
 	{
 		this->player->stop();
 	}
 
-	this->playing_notification_sent = false;
-
 	playlist_t pls;
 	IBookmarks::station_data_t std;
-
-	this->clear_tags();
 
 	if (bookmarks->get_station(group, station, std))
 	{
@@ -516,10 +516,26 @@ void RadiotrayNG::play(const std::string& group, const std::string& station)
 			this->notification_image = radiotray_ng::word_expand(this->config->get_string(RADIOTRAY_NG_NOTIFICATION_KEY, DEFAULT_RADIOTRAY_NG_NOTIFICATION_VALUE));
 		}
 
-		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+		// If not currently playing (or already stopped above), publish connecting state immediately.
+		// If late-stop and still playing, keep the old station going while we resolve the new playlist.
+		if (!was_playing || !late_stop)
+		{
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+		}
 
 		if (PlaylistDownloader(this->config).download_playlist(std, pls))
 		{
+			// Playlist resolved successfully — now stop the old station as late as possible.
+			if (late_stop && was_playing)
+			{
+				this->player->stop();
+			}
+
+			this->playing_notification_sent = false;
+			this->clear_tags();
+
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+
 			if (group != this->play_url_group)
 			{
 				this->config->set_string(LAST_STATION_GROUP_KEY, group);
@@ -536,16 +552,41 @@ void RadiotrayNG::play(const std::string& group, const std::string& station)
 				this->config->save();
 				return;
 			}
+
+			// player->play() failed — we already stopped the old station, so we're stopped now.
+			LOG(error) << "player failed to start: " << std.url;
+
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+			this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to start stream");
 		}
+		else
+		{
+			// Playlist download failed.
+			LOG(error) << "failed to download playlist: " << std.url;
 
-		LOG(error) << "failed to download playlist: " << std.url;
-
-		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
-		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist");
+			if (late_stop && was_playing)
+			{
+				// Keep the old station playing — just notify the user of the error.
+				LOG(info) << "keeping current station playing";
+				this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist for new station");
+			}
+			else
+			{
+				this->playing_notification_sent = false;
+				this->clear_tags();
+				this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+				this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist");
+			}
+		}
 	}
 	else
 	{
 		LOG(error) << "failed to read bookmark: " << group << " : " << station;
+
+		if (!was_playing || !late_stop)
+		{
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+		}
 
 		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Station Error");
 	}
