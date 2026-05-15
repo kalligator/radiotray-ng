@@ -198,7 +198,7 @@ void media_keys_t::gio_start()
 	LOG(debug) << "starting media keys";
 
 	this->dbus_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION,
-		GDBusProxyFlags{G_DBUS_PROXY_FLAGS_NONE},
+		GDBusProxyFlags{G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES},
 		nullptr,
 		this->dbus_name.c_str(),
 		this->object_path.c_str(),
