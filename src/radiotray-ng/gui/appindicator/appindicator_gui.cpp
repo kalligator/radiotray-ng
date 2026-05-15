@@ -844,11 +844,11 @@ void AppindicatorGui::run(int argc, char* argv[])
 		{
 			g_idle_add(
 				[](gpointer data) -> gboolean {
-					RadiotrayNg* app = static_cast<RadiotrayNg*>(data);
+					auto app = static_cast<IRadioTrayNG*>(data);
 					app->play();
 					return G_SOURCE_REMOVE;
 				},
-				radiotray_ng
+				radiotray_ng.get()
 			);
 		}
 	}
