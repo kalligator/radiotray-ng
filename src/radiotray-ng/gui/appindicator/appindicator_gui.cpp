@@ -842,7 +842,14 @@ void AppindicatorGui::run(int argc, char* argv[])
 	{
 		if (std::string(argv[1]) == "--play")
 		{
-			radiotray_ng->play();
+			g_idle_add(
+				[](gpointer data) -> gboolean {
+					RadiotrayNg* app = static_cast<RadiotrayNg*>(data);
+					app->play();
+					return G_SOURCE_REMOVE;
+				},
+				radiotray_ng
+			);
 		}
 	}
 
