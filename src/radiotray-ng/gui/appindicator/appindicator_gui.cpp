@@ -852,10 +852,10 @@ void AppindicatorGui::run(int argc, char* argv[])
 	if (autoplay_requested)
 	{
 		g_idle_add([](gpointer user_data) -> gboolean {
-			auto rtng = static_cast<RadiotrayNG*>(user_data);
+			auto rtng = static_cast<IRadioTrayNG*>(user_data);
 			rtng->play();
 			return FALSE;  // One-time callback
-		}, gpointer(radiotray_ng));
+		}, radiotray_ng.get());
 	}
 
 	gtk_main();
