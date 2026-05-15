@@ -193,35 +193,35 @@ void media_keys_t::on_gio_signal(GDBusProxy* /*proxy*/, gchar* /*sender_name*/, 
 
 void media_keys_t::gio_start()
 {
-	GError* error{nullptr};
+    LOG(debug) << "starting media keys";
 
-	LOG(debug) << "starting media keys";
-
-	this->dbus_proxy = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION,
-		GDBusProxyFlags{G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES},
-		nullptr,
-		this->dbus_name.c_str(),
-		this->object_path.c_str(),
-		this->interface_name.c_str(),
-		nullptr,
-		&error);
-
-	if (this->dbus_proxy == nullptr)
-	{
-		LOG(error) << "could not connect to rtng_dbus, media keys disabled";
-		return;
-	}
-
-	g_signal_connect(this->dbus_proxy, "g-signal", G_CALLBACK(on_gio_signal), this);
-
-	g_dbus_proxy_call(this->dbus_proxy,
-		"GrabMediaPlayerKeys",
-		g_variant_new("(su)", this->app_name.c_str(), 0),
-		G_DBUS_CALL_FLAGS_NO_AUTO_START,
-		-1,
-		nullptr,
-		nullptr,
-		nullptr);
+    // create proxy asynchronously to avoid blocking during autostart.
+    g_dbus_proxy_new_for_bus(G_BUS_TYPE_SESSION,
+        GDBusProxyFlags{G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES},
+        nullptr,
+        this->dbus_name.c_str(),
+        this->object_path.c_str(),
+        this->interface_name.c_str(),
+        nullptr,
+        [](GObject * /*unused*/, GAsyncResult *res, gpointer user_data){
+            GError *err = nullptr;
+            media_keys_t *self = static_cast<media_keys_t*>(user_data);
+            self->dbus_proxy = g_dbus_proxy_new_for_bus_finish(res, &err);
+            if (!self->dbus_proxy) {
+                LOG(error) << "could not connect to rtng_dbus, media keys disabled";
+                return;
+            }
+            g_signal_connect(self->dbus_proxy, "g-signal", G_CALLBACK(on_gio_signal), self);
+            // Grab the media keys (async, ignore reply)
+            g_dbus_proxy_call(self->dbus_proxy,
+                "GrabMediaPlayerKeys",
+                g_variant_new("(su)", self->app_name.c_str(), 0),
+                G_DBUS_CALL_FLAGS_NO_AUTO_START,
+                -1,
+                nullptr,
+                nullptr,
+                nullptr);
+        }, this);
 }
 
 
