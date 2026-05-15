@@ -838,12 +838,24 @@ void AppindicatorGui::run(int argc, char* argv[])
 
 	this->build_menu();
 
-	if (argc > 1)
+	// Schedule autoplay after gtk_main() starts to ensure GStreamer bus watches
+	// are registered when the GLib main loop is actually running. This fixes
+	// autostart timing where play() was called before gtk_main(), causing
+	// bus watch callbacks to be queued with no event loop to dispatch them.
+	bool autoplay_requested = false;
+	if (argc > 1 && std::string(argv[1]) == "--play")
 	{
-		if (std::string(argv[1]) == "--play")
-		{
-			radiotray_ng->play();
-		}
+		autoplay_requested = true;
+	}
+
+	// Use g_idle_add to queue the autoplay callback after gtk_main starts
+	if (autoplay_requested)
+	{
+		g_idle_add([](gpointer user_data) -> gboolean {
+			auto rtng = static_cast<RadiotrayNG*>(user_data);
+			rtng->play();
+			return FALSE;  // One-time callback
+		}, gpointer(radiotray_ng));
 	}
 
 	gtk_main();
