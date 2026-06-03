@@ -94,6 +94,8 @@ using playlist_t = std::vector<std::string>;
 #define ROOT_GROUP_BOTTOM_POS_KEY         "root-group-bottom-pos"
 #define SLEEP_TIMER_KEY                   "sleep-timer"
 #define SPLIT_TITLE_KEY                   "split-title"
+#define LATE_STOP_KEY                     "late-stop"
+#define STATION_SWITCH_DELAY_KEY          "station-switch-delay"
 #define IHR_TITLE_KEY                     "ihr-title"
 #define TAG_INFO_IN_LABEL_KEY             "tag-info-in-label"
 #define TAG_INFO_IN_LABEL_LEN_KEY         "tag-info-in-label-len"
@@ -147,6 +149,8 @@ using playlist_t = std::vector<std::string>;
 #define DEFAULT_NOTIFICATION_VERBOSE_VALUE       (true)
 #define DEFAULT_SLEEP_TIMER_VALUE                uint32_t(60)
 #define DEFAULT_SPLIT_TITLE_VALUE                (true)
+#define DEFAULT_LATE_STOP_VALUE                  (true)
+#define DEFAULT_STATION_SWITCH_DELAY_VALUE       uint32_t(150)
 #define DEFAULT_IHR_TITLE_KEY_VALUE              (true)
 #define DEFAULT_STATION_IMAGE_VALUE              ""
 #define DEFAULT_TAG_INFO_IN_LABEL_VALUE          (false)

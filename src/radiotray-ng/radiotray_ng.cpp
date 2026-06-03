@@ -48,6 +48,14 @@ RadiotrayNG::RadiotrayNG(std::shared_ptr<IConfig> config, std::shared_ptr<IBookm
 
 RadiotrayNG::~RadiotrayNG()
 {
+	// Signal the station switch worker to exit.
+	this->shutting_down = true;
+	this->switch_cv.notify_one();
+	if (this->switch_thread.joinable())
+	{
+		this->switch_thread.join();
+	}
+
 	this->config->save();
 }
 
@@ -256,7 +264,8 @@ void RadiotrayNG::next_station_msg()
 	{
 		if (this->current_station_index < int(this->current_group_stations.size()-1))
 		{
-			this->play(this->group, this->current_group_stations[++this->current_station_index].name);
+			++this->current_station_index;
+			this->schedule_station_switch();
 		}
 	}
 }
@@ -268,7 +277,74 @@ void RadiotrayNG::previous_station_msg()
 	{
 		if (this->current_station_index > 0)
 		{
-			this->play(this->group, this->current_group_stations[--this->current_station_index].name);
+			--this->current_station_index;
+			this->schedule_station_switch();
+		}
+	}
+}
+
+
+void RadiotrayNG::schedule_station_switch()
+{
+	{
+		std::lock_guard<std::mutex> lock(this->switch_mtx);
+		this->pending_station_index = this->current_station_index;
+		this->pending_group = this->group;
+		this->switch_pending = true;
+	}
+	this->switch_cv.notify_one();
+
+	// Lazily start the worker thread on first use.
+	if (!this->switch_thread.joinable())
+	{
+		this->switch_thread = std::thread(&RadiotrayNG::station_switch_worker, this);
+	}
+}
+
+
+void RadiotrayNG::station_switch_worker()
+{
+	while (!this->shutting_down)
+	{
+		std::unique_lock<std::mutex> lock(this->switch_mtx);
+		this->switch_cv.wait(lock, [this]{ return this->switch_pending.load() || this->shutting_down.load(); });
+
+		if (this->shutting_down)
+		{
+			break;
+		}
+
+		// Wait for the debounce period. If more next/prev presses come in during
+		// this time, pending_station_index gets updated and we restart the wait.
+		const auto delay = std::chrono::milliseconds(
+			this->config->get_uint32(STATION_SWITCH_DELAY_KEY, DEFAULT_STATION_SWITCH_DELAY_VALUE));
+
+		while (true)
+		{
+			int snapshot = this->pending_station_index;
+			lock.unlock();
+
+			std::this_thread::sleep_for(delay);
+
+			lock.lock();
+
+			// If the index hasn't changed during the sleep, the user is done pressing.
+			if (this->pending_station_index == snapshot)
+			{
+				break;
+			}
+			// Otherwise loop and wait again for the new value to settle.
+		}
+
+		this->switch_pending = false;
+		const int target_index = this->pending_station_index;
+		const std::string target_group = this->pending_group;
+		lock.unlock();
+
+		// Perform the actual station switch (downloads playlist, starts stream).
+		if (target_index >= 0 && target_index < int(this->current_group_stations.size()))
+		{
+			this->play(target_group, this->current_group_stations[target_index].name);
 		}
 	}
 }
@@ -490,17 +566,17 @@ void RadiotrayNG::play_url(const std::string& url)
 
 void RadiotrayNG::play(const std::string& group, const std::string& station)
 {
-	if (this->state == STATE_PLAYING)
+	const bool late_stop = this->config->get_bool(LATE_STOP_KEY, DEFAULT_LATE_STOP_VALUE);
+	const bool was_playing = (this->state == STATE_PLAYING || this->state == STATE_BUFFERING);
+
+	// If late-stop is disabled, stop immediately (original behavior).
+	if (!late_stop && was_playing)
 	{
 		this->player->stop();
 	}
 
-	this->playing_notification_sent = false;
-
 	playlist_t pls;
 	IBookmarks::station_data_t std;
-
-	this->clear_tags();
 
 	if (bookmarks->get_station(group, station, std))
 	{
@@ -516,10 +592,26 @@ void RadiotrayNG::play(const std::string& group, const std::string& station)
 			this->notification_image = radiotray_ng::word_expand(this->config->get_string(RADIOTRAY_NG_NOTIFICATION_KEY, DEFAULT_RADIOTRAY_NG_NOTIFICATION_VALUE));
 		}
 
-		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+		// If not currently playing (or already stopped above), publish connecting state immediately.
+		// If late-stop and still playing, keep the old station going while we resolve the new playlist.
+		if (!was_playing || !late_stop)
+		{
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+		}
 
 		if (PlaylistDownloader(this->config).download_playlist(std, pls))
 		{
+			// Playlist resolved successfully — now stop the old station as late as possible.
+			if (late_stop && was_playing)
+			{
+				this->player->stop();
+			}
+
+			this->playing_notification_sent = false;
+			this->clear_tags();
+
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+
 			if (group != this->play_url_group)
 			{
 				this->config->set_string(LAST_STATION_GROUP_KEY, group);
@@ -536,16 +628,41 @@ void RadiotrayNG::play(const std::string& group, const std::string& station)
 				this->config->save();
 				return;
 			}
+
+			// player->play() failed — we already stopped the old station, so we're stopped now.
+			LOG(error) << "player failed to start: " << std.url;
+
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+			this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to start stream");
 		}
+		else
+		{
+			// Playlist download failed.
+			LOG(error) << "failed to download playlist: " << std.url;
 
-		LOG(error) << "failed to download playlist: " << std.url;
-
-		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
-		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist");
+			if (late_stop && was_playing)
+			{
+				// Keep the old station playing — just notify the user of the error.
+				LOG(info) << "keeping current station playing";
+				this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist for new station");
+			}
+			else
+			{
+				this->playing_notification_sent = false;
+				this->clear_tags();
+				this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+				this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist");
+			}
+		}
 	}
 	else
 	{
 		LOG(error) << "failed to read bookmark: " << group << " : " << station;
+
+		if (!was_playing || !late_stop)
+		{
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+		}
 
 		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Station Error");
 	}

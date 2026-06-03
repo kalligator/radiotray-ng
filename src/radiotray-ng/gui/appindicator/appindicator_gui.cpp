@@ -806,9 +806,26 @@ void AppindicatorGui::run(int argc, char* argv[])
 {
 	gtk_init(&argc, &argv);
 
+	// Ensure GTK's icon theme searches user-local icon directories first.
+	// This allows icons from ~/.local/share/icons/<theme>/ or ~/.icons/<theme>/
+	// to take priority over system-installed ones.
+	GtkIconTheme* icon_theme = gtk_icon_theme_get_default();
+	const std::string user_icons_local = radiotray_ng::word_expand("~/.local/share/icons");
+	const std::string user_icons_home = radiotray_ng::word_expand("~/.icons");
+	gtk_icon_theme_prepend_search_path(icon_theme, user_icons_local.c_str());
+	gtk_icon_theme_prepend_search_path(icon_theme, user_icons_home.c_str());
+
 	const std::string icon_off{radiotray_ng::word_expand(this->config->get_string(RADIOTRAY_NG_ICON_OFF_KEY, DEFAULT_RADIOTRAY_NG_ICON_OFF_VALUE))};
 
 	this->appindicator = app_indicator_new(APP_NAME, icon_off.c_str(), APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+
+	// Tell the indicator service (e.g. wingpanel on elementaryOS) where to find
+	// icons. This path is communicated over D-Bus so the panel process can resolve
+	// icon names even when they're in user-local theme directories.
+	// We point it to the user's icon dir; the indicator will search for
+	// <path>/<icon_name>.{svg,png} there.
+	app_indicator_set_icon_theme_path(this->appindicator, user_icons_local.c_str());
+
 	app_indicator_set_attention_icon(this->appindicator, icon_off.c_str());
 	app_indicator_set_status(this->appindicator, APP_INDICATOR_STATUS_ACTIVE);
 
@@ -825,7 +842,14 @@ void AppindicatorGui::run(int argc, char* argv[])
 	{
 		if (std::string(argv[1]) == "--play")
 		{
-			radiotray_ng->play();
+			g_idle_add(
+				[](gpointer data) -> gboolean {
+					auto app = static_cast<IRadioTrayNG*>(data);
+					app->play();
+					return G_SOURCE_REMOVE;
+				},
+				radiotray_ng.get()
+			);
 		}
 	}
 

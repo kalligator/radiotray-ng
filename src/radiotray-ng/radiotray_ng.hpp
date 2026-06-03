@@ -25,6 +25,11 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 class IConfig;
 class IPlayer;
@@ -135,6 +140,18 @@ private:
 	void register_handlers();
 	void set_and_save_volume(uint32_t new_volume);
 	void clear_tags();
+
+	// Debounced station switching — accumulates rapid next/prev presses
+	void schedule_station_switch();
+	void station_switch_worker();
+
+	std::mutex switch_mtx;
+	std::condition_variable switch_cv;
+	std::thread switch_thread;
+	std::atomic<bool> switch_pending{false};
+	std::atomic<bool> shutting_down{false};
+	int pending_station_index{-1};
+	std::string pending_group;
 
 	Notification notification;
 
