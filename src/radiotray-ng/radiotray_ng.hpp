@@ -25,6 +25,11 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 class IConfig;
 class IPlayer;
@@ -130,11 +135,35 @@ private:
 	void on_message_event(const IEventBus::event& ev, IEventBus::event_data_t& data);
 	void on_tags_changed_event_notification(const IEventBus::event& ev, IEventBus::event_data_t& data);
 	void on_tags_changed_event_processing(const IEventBus::event& ev, IEventBus::event_data_t& data);
+	void on_pending_ready_event(const IEventBus::event& ev, IEventBus::event_data_t& data);
 
 	void display_volume_level();
 	void register_handlers();
 	void set_and_save_volume(uint32_t new_volume);
 	void clear_tags();
+
+	// Debounced station switching — accumulates rapid next/prev presses
+	void schedule_station_switch();
+	void station_switch_worker();
+
+	std::mutex switch_mtx;
+	std::condition_variable switch_cv;
+	std::thread switch_thread;
+	std::atomic<bool> switch_pending{false};
+	std::atomic<bool> shutting_down{false};
+	int pending_station_index{-1};
+	std::string pending_group;
+
+	// Seamless switching: metadata for the station being prepared on the pending pipeline
+	struct PendingStationInfo
+	{
+		std::string group;
+		std::string station_name;
+		std::string url;
+		bool notifications = true;
+		bool active = false;  // true if a prepare() is in flight
+	};
+	PendingStationInfo seamless_pending;
 
 	Notification notification;
 

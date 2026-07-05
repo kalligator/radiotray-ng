@@ -48,6 +48,14 @@ RadiotrayNG::RadiotrayNG(std::shared_ptr<IConfig> config, std::shared_ptr<IBookm
 
 RadiotrayNG::~RadiotrayNG()
 {
+	// Signal the station switch worker to exit.
+	this->shutting_down = true;
+	this->switch_cv.notify_one();
+	if (this->switch_thread.joinable())
+	{
+		this->switch_thread.join();
+	}
+
 	this->config->save();
 }
 
@@ -56,6 +64,7 @@ void RadiotrayNG::stop()
 {
 	LOG(info) << "stopping player";
 
+	this->seamless_pending.active = false;
 	this->playing_notification_sent = false;
 
 	if (this->config->get_bool(NOTIFICATION_KEY, DEFAULT_NOTIFICATION_VALUE) &&
@@ -256,7 +265,8 @@ void RadiotrayNG::next_station_msg()
 	{
 		if (this->current_station_index < int(this->current_group_stations.size()-1))
 		{
-			this->play(this->group, this->current_group_stations[++this->current_station_index].name);
+			++this->current_station_index;
+			this->schedule_station_switch();
 		}
 	}
 }
@@ -268,7 +278,74 @@ void RadiotrayNG::previous_station_msg()
 	{
 		if (this->current_station_index > 0)
 		{
-			this->play(this->group, this->current_group_stations[--this->current_station_index].name);
+			--this->current_station_index;
+			this->schedule_station_switch();
+		}
+	}
+}
+
+
+void RadiotrayNG::schedule_station_switch()
+{
+	{
+		std::lock_guard<std::mutex> lock(this->switch_mtx);
+		this->pending_station_index = this->current_station_index;
+		this->pending_group = this->group;
+		this->switch_pending = true;
+	}
+	this->switch_cv.notify_one();
+
+	// Lazily start the worker thread on first use.
+	if (!this->switch_thread.joinable())
+	{
+		this->switch_thread = std::thread(&RadiotrayNG::station_switch_worker, this);
+	}
+}
+
+
+void RadiotrayNG::station_switch_worker()
+{
+	while (!this->shutting_down)
+	{
+		std::unique_lock<std::mutex> lock(this->switch_mtx);
+		this->switch_cv.wait(lock, [this]{ return this->switch_pending.load() || this->shutting_down.load(); });
+
+		if (this->shutting_down)
+		{
+			break;
+		}
+
+		// Wait for the debounce period. If more next/prev presses come in during
+		// this time, pending_station_index gets updated and we restart the wait.
+		const auto delay = std::chrono::milliseconds(
+			this->config->get_uint32(STATION_SWITCH_DELAY_KEY, DEFAULT_STATION_SWITCH_DELAY_VALUE));
+
+		while (true)
+		{
+			int snapshot = this->pending_station_index;
+			lock.unlock();
+
+			std::this_thread::sleep_for(delay);
+
+			lock.lock();
+
+			// If the index hasn't changed during the sleep, the user is done pressing.
+			if (this->pending_station_index == snapshot)
+			{
+				break;
+			}
+			// Otherwise loop and wait again for the new value to settle.
+		}
+
+		this->switch_pending = false;
+		const int target_index = this->pending_station_index;
+		const std::string target_group = this->pending_group;
+		lock.unlock();
+
+		// Perform the actual station switch (downloads playlist, starts stream).
+		if (target_index >= 0 && target_index < int(this->current_group_stations.size()))
+		{
+			this->play(target_group, this->current_group_stations[target_index].name);
 		}
 	}
 }
@@ -490,65 +567,135 @@ void RadiotrayNG::play_url(const std::string& url)
 
 void RadiotrayNG::play(const std::string& group, const std::string& station)
 {
-	if (this->state == STATE_PLAYING)
-	{
-		this->player->stop();
-	}
-
-	this->playing_notification_sent = false;
+	const bool seamless = this->config->get_bool(SEAMLESS_SWITCHING_KEY, DEFAULT_SEAMLESS_SWITCHING_VALUE);
+	const bool late_stop = this->config->get_bool(LATE_STOP_KEY, DEFAULT_LATE_STOP_VALUE);
+	const bool was_playing = (this->state == STATE_PLAYING || this->state == STATE_BUFFERING);
 
 	playlist_t pls;
 	IBookmarks::station_data_t std;
 
-	this->clear_tags();
-
-	if (bookmarks->get_station(group, station, std))
+	if (!bookmarks->get_station(group, station, std))
 	{
-		LOG(info) << "downloading: " << group << ", " << station << ", " << std.url;
+		LOG(error) << "failed to read bookmark: " << group << " : " << station;
 
-		// replace image path & expand if necessary...
-		if (!std.image.empty())
+		if (!was_playing)
 		{
-			this->notification_image = std.image;
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+		}
+
+		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Station Error");
+		return;
+	}
+
+	LOG(info) << "downloading: " << group << ", " << station << ", " << std.url;
+
+	// Update notification image
+	if (!std.image.empty())
+	{
+		this->notification_image = std.image;
+	}
+	else
+	{
+		this->notification_image = radiotray_ng::word_expand(this->config->get_string(RADIOTRAY_NG_NOTIFICATION_KEY, DEFAULT_RADIOTRAY_NG_NOTIFICATION_VALUE));
+	}
+
+	// Download the playlist (old station keeps playing during this if was_playing)
+	if (!was_playing)
+	{
+		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+	}
+
+	if (!PlaylistDownloader(this->config).download_playlist(std, pls))
+	{
+		LOG(error) << "failed to download playlist: " << std.url;
+
+		if (was_playing)
+		{
+			// Keep old station — just notify error
+			LOG(info) << "keeping current station playing";
+			this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist for new station");
 		}
 		else
 		{
-			this->notification_image = radiotray_ng::word_expand(this->config->get_string(RADIOTRAY_NG_NOTIFICATION_KEY, DEFAULT_RADIOTRAY_NG_NOTIFICATION_VALUE));
+			this->playing_notification_sent = false;
+			this->clear_tags();
+			this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+			this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist");
 		}
+		return;
+	}
 
-		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+	// === Playlist resolved successfully ===
 
-		if (PlaylistDownloader(this->config).download_playlist(std, pls))
+	// Strategy 1: SEAMLESS (dual-pipeline) — if enabled and currently playing
+	if (seamless && was_playing)
+	{
+		LOG(info) << "attempting seamless switch via pending pipeline";
+
+		// Store pending station metadata for when pending_ready fires
+		this->seamless_pending.group = group;
+		this->seamless_pending.station_name = std.name;
+		this->seamless_pending.url = std.url;
+		this->seamless_pending.notifications = std.notifications;
+		this->seamless_pending.active = true;
+
+		if (this->player->prepare(pls))
 		{
+			// Save config immediately (the actual switch happens in on_pending_ready_event)
 			if (group != this->play_url_group)
 			{
 				this->config->set_string(LAST_STATION_GROUP_KEY, group);
 				this->config->set_string(LAST_STATION_KEY, std.name);
 				this->config->set_bool(LAST_STATION_NOTIFICATION_KEY, std.notifications);
-			}
-
-			this->set_station(group, std.name, std.notifications);
-
-			if (this->player->play(pls))
-			{
-				this->url = std.url;
-
 				this->config->save();
-				return;
 			}
+			return;  // Wait for pending_ready event to call activate()
 		}
 
-		LOG(error) << "failed to download playlist: " << std.url;
-
-		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
-		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to download playlist");
+		// prepare() failed — fall through to late-stop
+		LOG(warning) << "seamless prepare failed, falling through to late-stop";
+		this->seamless_pending.active = false;
 	}
-	else
+
+	// Strategy 2: LATE-STOP — stop old only after playlist is ready (already downloaded above)
+	if (late_stop && was_playing)
 	{
-		LOG(error) << "failed to read bookmark: " << group << " : " << station;
-
-		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Station Error");
+		LOG(info) << "late-stop: stopping old station now";
+		this->player->stop();
 	}
+	// Strategy 3: CLASSIC — if not late_stop and was_playing, stop was already done... 
+	// Actually in this new flow we haven't stopped yet. Handle classic:
+	else if (!late_stop && was_playing)
+	{
+		this->player->stop();
+	}
+
+	// Common path: start playing the new station directly
+	this->playing_notification_sent = false;
+	this->clear_tags();
+
+	this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_CONNECTING);
+
+	if (group != this->play_url_group)
+	{
+		this->config->set_string(LAST_STATION_GROUP_KEY, group);
+		this->config->set_string(LAST_STATION_KEY, std.name);
+		this->config->set_bool(LAST_STATION_NOTIFICATION_KEY, std.notifications);
+	}
+
+	this->set_station(group, std.name, std.notifications);
+
+	if (this->player->play(pls))
+	{
+		this->url = std.url;
+		this->config->save();
+		return;
+	}
+
+	// player->play() failed
+	LOG(error) << "player failed to start: " << std.url;
+	this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+	this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Failed to start stream");
 }
 
 
@@ -666,6 +813,39 @@ bool RadiotrayNG::reload_bookmarks()
 }
 
 
+void RadiotrayNG::on_pending_ready_event(const IEventBus::event& /*ev*/, IEventBus::event_data_t& /*data*/)
+{
+	if (!this->seamless_pending.active)
+	{
+		LOG(warning) << "pending_ready received but no seamless switch in progress";
+		return;
+	}
+
+	LOG(info) << "pending pipeline ready, activating seamless switch to: " << this->seamless_pending.station_name;
+
+	// Clear current tags before the switch
+	this->playing_notification_sent = false;
+	this->clear_tags();
+
+	// Update station metadata
+	this->set_station(this->seamless_pending.group, this->seamless_pending.station_name, this->seamless_pending.notifications);
+	this->url = this->seamless_pending.url;
+
+	// Activate the pending pipeline (stops old, unmutes new, publishes PLAYING)
+	if (!this->player->activate())
+	{
+		LOG(error) << "activate() failed, falling back to direct play";
+
+		// The pending pipeline failed to activate — the old station was already stopped
+		// by activate() internally. Try a direct play as last resort.
+		this->event_bus->publish_only(IEventBus::event::state_changed, STATE_KEY, STATE_STOPPED);
+		this->event_bus->publish_only(IEventBus::event::station_error, ERROR_KEY, "Seamless switch failed");
+	}
+
+	this->seamless_pending.active = false;
+}
+
+
 void RadiotrayNG::register_handlers()
 {
 	this->event_bus->subscribe(IEventBus::event::tags_changed,
@@ -682,4 +862,7 @@ void RadiotrayNG::register_handlers()
 
 	this->event_bus->subscribe(IEventBus::event::message,
 		std::bind(&RadiotrayNG::on_message_event, this, std::placeholders::_1, std::placeholders::_2), IEventBus::event_pos::last);
+
+	this->event_bus->subscribe(IEventBus::event::pending_ready,
+		std::bind(&RadiotrayNG::on_pending_ready_event, this, std::placeholders::_1, std::placeholders::_2), IEventBus::event_pos::first);
 }

@@ -18,10 +18,28 @@
 #include <radiotray-ng/common.hpp>
 #include <radiotray-ng/notification/notification.hpp>
 #include <libnotify/notify.h>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <deque>
 
-// lazy pimpl...
+// The notification worker runs on a dedicated thread so that a stalled
+// notification daemon (e.g. elementaryOS io.elementary.notifications)
+// cannot block the main loop or media key handling.
+//
+// Notifications are queued (max 2 entries). When multiple notifications
+// pile up while the daemon is slow, intermediate ones are dropped but
+// the most recent one is always preserved and shown. This ensures the
+// final "now playing" notification is never lost.
 struct notify_t
 {
+	struct entry
+	{
+		std::string title;
+		std::string message;
+		std::string image;
+	};
+
 	notify_t()
 	{
 		notify_init(APP_NAME);
@@ -29,14 +47,113 @@ struct notify_t
 
 		notify_notification_set_urgency(this->nn, NOTIFY_URGENCY_NORMAL);
 		notify_notification_set_timeout(this->nn, NOTIFY_EXPIRES_DEFAULT);
+
+		this->worker = std::thread(&notify_t::run, this);
 	}
 
 	~notify_t()
 	{
+		{
+			std::lock_guard<std::mutex> lock(this->mtx);
+			this->done = true;
+		}
+		this->cv.notify_one();
+
+		if (this->worker.joinable())
+		{
+			this->worker.join();
+		}
+
 		notify_notification_close(this->nn, nullptr);
 		g_object_unref(G_OBJECT(this->nn));
 		notify_uninit();
 	}
+
+	void send(const std::string& title, const std::string& message, const std::string& image)
+	{
+		{
+			std::lock_guard<std::mutex> lock(this->mtx);
+
+			// Keep at most 1 pending entry. If there's already a pending
+			// notification waiting, replace it (we only care about the latest).
+			// But if the worker is currently showing one, this becomes the "next"
+			// one to show — guaranteeing it will be displayed.
+			if (this->queue.size() >= 2)
+			{
+				// Replace the last queued entry (keep the one being shown).
+				this->queue.back() = {title, message, image};
+			}
+			else
+			{
+				this->queue.push_back({title, message, image});
+			}
+		}
+		this->cv.notify_one();
+	}
+
+private:
+	void run()
+	{
+		while (true)
+		{
+			std::unique_lock<std::mutex> lock(this->mtx);
+			this->cv.wait(lock, [this]{ return !this->queue.empty() || this->done; });
+
+			if (this->done && this->queue.empty())
+			{
+				break;
+			}
+
+			// Take the front entry.
+			entry e = std::move(this->queue.front());
+			this->queue.pop_front();
+			lock.unlock();
+
+			// This call may block if the daemon is unresponsive — that's fine,
+			// it only blocks this worker thread, not the main loop.
+
+			// Clear any previous image data to prevent stale images from
+			// persisting across notifications (we reuse the same object).
+			notify_notification_clear_hints(this->nn);
+
+			if (!e.image.empty() && e.image[0] == '/')
+			{
+				// Absolute file path — pass as file:// URI in the icon field.
+				// This tells the daemon to use it as the notification image
+				// without setting a separate pixbuf hint (which causes the
+				// daemon to show both an overlay icon and a main image).
+				const std::string file_uri = "file://" + e.image;
+				notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), file_uri.c_str());
+			}
+			else if (!e.image.empty())
+			{
+				// Icon theme name — set as the icon parameter.
+				notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), e.image.c_str());
+			}
+			else
+			{
+				// No image — clear everything.
+				notify_notification_update(this->nn, e.title.c_str(), e.message.c_str(), nullptr);
+			}
+
+			GError* error = nullptr;
+			if (!notify_notification_show(this->nn, &error))
+			{
+				if (error)
+				{
+					LOG(warning) << "notification show failed: " << error->message;
+					g_error_free(error);
+				}
+			}
+		}
+	}
+
+	std::mutex mtx;
+	std::condition_variable cv;
+	std::thread worker;
+	std::deque<entry> queue;
+	bool done = false;
+
 	NotifyNotification* nn;
 };
 
@@ -62,6 +179,5 @@ void Notification::notify(const std::string& title, const std::string& message, 
 {
 	LOG(debug) << "notify: " << title << ", " << message << ", " << image;
 
-	notify_notification_update(this->n->nn, title.c_str(), message.c_str(), radiotray_ng::word_expand(image).c_str());
-	notify_notification_show(this->n->nn, nullptr);
+	this->n->send(title, message, radiotray_ng::word_expand(image));
 }

@@ -32,7 +32,8 @@ public:
 		station_error,
 		tags_changed,
 		volume_changed,
-		message
+		message,
+		pending_ready
 	};
 
 	enum class event_pos : uint8_t

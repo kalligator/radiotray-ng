@@ -22,6 +22,24 @@
 #include <radiotray-ng/i_player.hpp>
 
 #include <gst/gst.h>
+#include <atomic>
+
+
+// Internal helper: a single GStreamer playbin pipeline instance.
+struct Pipeline
+{
+	GstElement* playbin = nullptr;
+	GstElement* souphttpsrc = nullptr;
+	GstClock*   clock = nullptr;
+	GstClockID  clock_id = nullptr;
+	GstBus*     bus = nullptr;
+	bool        buffering = false;
+	bool        has_played = false;
+	playlist_t  current_playlist;
+
+	// Percentage threshold at which we consider buffering "ready" (for pending pipeline).
+	int         buffer_ready_threshold = 100;
+};
 
 
 class Player final : public IPlayer
@@ -31,41 +49,49 @@ public:
 
 	virtual ~Player();
 
-	bool play(const playlist_t& playlist);
+	bool play(const playlist_t& playlist) override;
 
-	void stop();
+	void stop() override;
 
-	void volume(uint32_t percent);
+	void volume(uint32_t percent) override;
 
-	void mute();
+	void mute() override;
 
-	void unmute();
+	void unmute() override;
 
-	bool is_muted();
+	bool is_muted() override;
+
+	bool prepare(const playlist_t& playlist) override;
+
+	bool activate() override;
+
+	void cancel_prepare() override;
+
+	bool is_pending_ready() override;
 
 private:
-	void gst_start();
-	void gst_stop();
+	// Pipeline lifecycle
+	bool create_pipeline(Pipeline& p);
+	void destroy_pipeline(Pipeline& p);
+	bool start_pipeline(Pipeline& p, const playlist_t& playlist);
+	void stop_pipeline(Pipeline& p, bool publish_stopped);
 
+	bool play_next(Pipeline& p);
+
+	// GStreamer callbacks for the active pipeline
 	static gboolean handle_messages_cb(GstBus* bus, GstMessage* message, gpointer user_data);
 	static gboolean timer_cb(GstClock* clock, GstClockTime time, GstClockID id, gpointer user_data);
 	static gboolean notify_volume_cb(GstBus* bus, GstMessage* message, gpointer user_data);
-
 	static void for_each_tag_cb(const GstTagList* list, const gchar* tag, gpointer user_data);
 
-	bool play_next();
+	// GStreamer callbacks for the pending pipeline (no tags, no state events except pending_ready)
+	static gboolean handle_pending_messages_cb(GstBus* bus, GstMessage* message, gpointer user_data);
+	static gboolean pending_timer_cb(GstClock* clock, GstClockTime time, GstClockID id, gpointer user_data);
 
-	GstElement* pipeline = nullptr;
-	GstElement* souphttpsrc = nullptr;
-	GstClock*   clock = nullptr;
-	GstClockID  clock_id = nullptr;
-	bool        buffering = false;
-	bool        has_played = false;
-
-	playlist_t current_playlist;
+	Pipeline active;
+	Pipeline pending;
+	std::atomic<bool> pending_ready{false};
 
 	std::shared_ptr<IEventBus> event_bus;
 	std::shared_ptr<IConfig> config;
-
-	GstBus* gst_bus = nullptr;
 };
